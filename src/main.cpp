@@ -1,88 +1,59 @@
-#include "../include/config.h"
+#include <FS.h>                   // Fontos: a fájlrendszer legyen az első!
+#include <LittleFS.h>             // Modern és stabilabb, mint az elavult SPIFFS
+
 #include <ESP8266WiFi.h>
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>          // WiFiManager könyvtár
 
 #include <ArduinoJson.h>
-
 #include <Ticker.h>
 #include <AsyncMqttClient.h>
-
-//temp sensor DHT
 #include <DHT.h>
-#define DHTPIN            2         // Pin which is connected to the DHT sensor.
 
-// Uncomment the type of sensor in use:
-//#define DHTTYPE           DHT11     // DHT 11 
-#define DHTTYPE           DHT22     // DHT 22 (AM2302)
-//#define DHTTYPE           DHT21     // DHT 21 (AM2301)
+#define DHTPIN          2         // GPIO2 az ESP-01-en
+#define DHTTYPE         DHT22     // DHT 22 (AM2302)
 DHT dht = DHT(DHTPIN, DHTTYPE);
-
-// #define MQTT_HOST IPAddress(192, 168, 1, 31)
-// #define MQTT_PORT 1883
 
 AsyncMqttClient mqttClient;
 Ticker mqttReconnectTimer;
 
-WiFiEventHandler wifiConnectHandler;
-WiFiEventHandler wifiDisconnectHandler;
-Ticker wifiReconnectTimer;
+// Mentendő egyedi MQTT paraméterek (alapértelmezett értékekkel)
+char mqtt_server[40] = "192.168.1.31";
+char mqtt_server_port[6] = "1883";
+char mqtt_user[40] = "";
+char mqtt_password[40] = "";
+char mqtt_main_topic[50] = "pl_devices";
+char mqtt_device_name[40] = "esp01_DHT22_teracce_01";
 
-const char* ssid = wifiSSID;
-const char* password = wifiPassword;
-const char* mqtt_server = mqttServer;
-const int mqtt_server_port = mqttServerPort;
-const char* mqttServerUser = mqttUser;
-const char* mqttServerPWD = mqttPassword;
-
-const char* mqttMainTopic = mqttMainTopic_CFG;
-const char* mqttDeviceName = mqttDeviceName_CFG; 
-
+// Dinamikusan felépített topikok
 char full_mqtt_topic[100];
 char tempMqttTopic[120];
 char lwtTopic[120];
 
 float myTemperature = 0, myHumidity = 0; 
-float myTemperature_last = 0, myHumidity_last = 0; 
-
-unsigned long lastMsg = 0; // for DHT read interval
-#define MSG_BUFFER_SIZE	(50)
+unsigned long lastMsg = 0; 
+#define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
-int packageNotSentNumber = 0;
 
+// Flag, ami jelzi, ha a WiFiManager felületén új adatokat mentettek el
+bool shouldSaveConfig = false;
 
-void connectToWifi() {
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.hostname(mqttDeviceName);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+void saveConfigCallback() {
+  Serial.println("Config változás észlelve, mentés szükséges...");
+  shouldSaveConfig = true;
 }
 
 void connectToMqtt() {
-  Serial.println("Connecting to MQTT...");
-  mqttClient.connect();
-}
-
-void onWifiConnect(const WiFiEventStationModeGotIP& event) {
-  Serial.println("Connected to Wi-Fi.");
-  connectToMqtt();
-}
-
-void onWifiDisconnect(const WiFiEventStationModeDisconnected& event) {
-  Serial.println("Disconnected from Wi-Fi.");
-  mqttReconnectTimer.detach(); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
-  wifiReconnectTimer.once(2, connectToWifi);
+  if (WiFi.isConnected()) {
+    Serial.println("Csatlakozás az MQTT-hez...");
+    mqttClient.connect();
+  }
 }
 
 void onMqttConnect(bool sessionPresent) {
-  Serial.println("Connected to MQTT.");
-  Serial.print("Session present: ");
-  Serial.println(sessionPresent);
- 
+  Serial.println("MQTT-hez csatlakozva.");
+  
   snprintf(lwtTopic, sizeof(lwtTopic), "%s/%s", full_mqtt_topic, "availability");
   mqttClient.publish(lwtTopic, 2, true, "online");
 
@@ -91,85 +62,201 @@ void onMqttConnect(bool sessionPresent) {
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  Serial.println("Disconnected from MQTT.");
-
+  Serial.println("MQTT kapcsolat megszakadt.");
   if (WiFi.isConnected()) {
     mqttReconnectTimer.once(2, connectToMqtt);
   }
 }
 
 void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
-  Serial.println("Subscribe acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
-  Serial.print("  qos: ");
-  Serial.println(qos);
-}
-
-void onMqttUnsubscribe(uint16_t packetId) {
-  Serial.println("Unsubscribe acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
+  Serial.println("Feliratkozás nyugtázva.");
 }
 
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
   snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "commandTopic");
   if(strcmp(topic, tempMqttTopic) == 0){
-    Serial.println("led toggle, pull relay");
+    Serial.println("Relé vagy LED kapcsolási parancs érkezett");
   }
 }
 
-void onMqttPublish(uint16_t packetId) {
-  Serial.println("Publish acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
+void onMqttPublish(uint16_t packetId) {}
+
+// Konfiguráció betöltése a LittleFS-ből
+void loadConfig() {
+  if (LittleFS.begin()) {
+    if (LittleFS.exists("/config.json")) {
+      File configFile = LittleFS.open("/config.json", "r");
+      if (configFile) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, configFile);
+        if (!error) {
+          strcpy(mqtt_server, doc["mqtt_server"] | mqtt_server);
+          strcpy(mqtt_server_port, doc["mqtt_server_port"] | mqtt_server_port);
+          strcpy(mqtt_user, doc["mqtt_user"] | mqtt_user);
+          strcpy(mqtt_password, doc["mqtt_password"] | mqtt_password);
+          strcpy(mqtt_main_topic, doc["mqtt_main_topic"] | mqtt_main_topic);
+          strcpy(mqtt_device_name, doc["mqtt_device_name"] | mqtt_device_name);
+        }
+        configFile.close();
+      }
+    }
+  } else {
+    Serial.println("LittleFS hiba indításkor!");
+  }
+}
+
+// Konfiguráció mentése a LittleFS-be
+void saveConfig() {
+  JsonDocument doc;
+  doc["mqtt_server"] = mqtt_server;
+  doc["mqtt_server_port"] = mqtt_server_port;
+  doc["mqtt_user"] = mqtt_user;
+  doc["mqtt_password"] = mqtt_password;
+  doc["mqtt_main_topic"] = mqtt_main_topic;
+  doc["mqtt_device_name"] = mqtt_device_name;
+
+  File configFile = LittleFS.open("/config.json", "w");
+  if (configFile) {
+    serializeJson(doc, configFile);
+    configFile.close();
+    Serial.println("Beállítások sikeresen mentve a LittleFS-be.");
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println();
-  Serial.println();
+  Serial.println("\nIndítás...");
 
-  snprintf(full_mqtt_topic, sizeof(full_mqtt_topic), "%s/%s", mqttMainTopic, mqttDeviceName);
-  
   pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH); // D4 LED TURN OFF HIGH STATE
+  digitalWrite(LED_BUILTIN, HIGH); // LED kikapcsolása (High State)
 
   dht.begin();
 
-  wifiConnectHandler = WiFi.onStationModeGotIP(onWifiConnect);
-  wifiDisconnectHandler = WiFi.onStationModeDisconnected(onWifiDisconnect);
+  // 1. Mentett beállítások betöltése a flash memóriából
+  loadConfig();
+
+  // Mód kényszerítése és Hostname beállítása ---
+  WiFi.mode(WIFI_STA); 
+  if (strlen(mqtt_device_name) > 0) {
+    WiFi.hostname(mqtt_device_name);
+  } else {
+    WiFi.hostname("esp01_dht22_fallback");
+  }
+  // -----------------------------------------------------------
+
+  // 2. WiFiManager paraméterek előkészítése a webes felülethez
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, 40);
+  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_server_port, 6);
+  WiFiManagerParameter custom_mqtt_user("user", "MQTT User", mqtt_user, 40);
+  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", mqtt_password, 40);
+  WiFiManagerParameter custom_mqtt_main_topic("main_topic", "MQTT Main Topic", mqtt_main_topic, 50);
+  WiFiManagerParameter custom_mqtt_device_name("device_name", "Device Name (Hostname)", mqtt_device_name, 40);
+
+  WiFiManager wifiManager;
+  
+  // Callback beállítása mentés esetére
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  // Egyedi mezők hozzáadása a WiFiManager portálhoz
+  wifiManager.addParameter(&custom_mqtt_server);
+  wifiManager.addParameter(&custom_mqtt_port);
+  wifiManager.addParameter(&custom_mqtt_user);
+  wifiManager.addParameter(&custom_mqtt_pass);
+  wifiManager.addParameter(&custom_mqtt_main_topic);
+  wifiManager.addParameter(&custom_mqtt_device_name);
+
+  // Ha nem tud csatlakozni a mentett hálózathoz, elindítja az AP-t
+  if (!wifiManager.autoConnect("ESP01_DHT22_AP", "12345678")) {
+    Serial.println("Sikertelen csatlakozás, újraindítás...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  // Új adatok kiolvasása a felületről
+  strcpy(mqtt_server, custom_mqtt_server.getValue());
+  strcpy(mqtt_server_port, custom_mqtt_port.getValue());
+  strcpy(mqtt_user, custom_mqtt_user.getValue());
+  strcpy(mqtt_password, custom_mqtt_pass.getValue());
+  strcpy(mqtt_main_topic, custom_mqtt_main_topic.getValue());
+  strcpy(mqtt_device_name, custom_mqtt_device_name.getValue());
+
+  // Mentés után újraindítás az új hostname érvényesítéséhez ---
+  if (shouldSaveConfig) {
+    saveConfig();
+    Serial.println("Beállítások mentve. Újraindítás az új adatokkal...");
+    delay(1500);
+    ESP.restart(); // Újraindul, így már az ÚJ hostname-mel fog bejelentkezni a routerbe!
+  }
+  // ------------------------------------------------------------------------
+
+  Serial.println("Wi-Fi kapcsolat aktív!");
+  Serial.print("IP cím: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Hostname: ");
+  Serial.println(WiFi.hostname());
+
+  // 3. Topikok és MQTT kliens összeállítása a beolvasott adatokból
+  snprintf(full_mqtt_topic, sizeof(full_mqtt_topic), "%s/%s", mqtt_main_topic, mqtt_device_name);
 
   mqttClient.onConnect(onMqttConnect);
   mqttClient.onDisconnect(onMqttDisconnect);
   mqttClient.onSubscribe(onMqttSubscribe);
-  mqttClient.onUnsubscribe(onMqttUnsubscribe);
   mqttClient.onMessage(onMqttMessage);
   mqttClient.onPublish(onMqttPublish);
-  mqttClient.setCredentials(mqttServerUser, mqttServerPWD);
   
+  if (strlen(mqtt_user) > 0) {
+    mqttClient.setCredentials(mqtt_user, mqtt_password);
+  }
   
   snprintf(lwtTopic, sizeof(lwtTopic), "%s/%s", full_mqtt_topic, "availability");
   mqttClient.setWill(lwtTopic, 1, true, "offline");
-  mqttClient.setServer(mqtt_server, mqtt_server_port);
+  mqttClient.setServer(mqtt_server, atoi(mqtt_server_port));
 
-  connectToWifi();
+  connectToMqtt();
 }
 
 void loop() {
-    unsigned long now = millis();
+  unsigned long now = millis();
+  
+  if (WiFi.isConnected() && !mqttClient.connected() && !mqttReconnectTimer.active()) {
+    mqttReconnectTimer.once(5, connectToMqtt);
+  }
+
+  if (now - lastMsg > 15000) {
+    lastMsg = now;
     
-    if (now - lastMsg > 15000) {
-        lastMsg = now;
-        myTemperature = dht.readTemperature();
-        myHumidity = dht.readHumidity();
+    myTemperature = dht.readTemperature();
+    myHumidity = dht.readHumidity();
 
-        JsonDocument doc;
-        doc["temp"] = myTemperature;
-        doc["humi"] = myHumidity;
-
-        snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "sensors");   
-        serializeJson(doc, msg, MSG_BUFFER_SIZE);
-        mqttClient.publish(tempMqttTopic, 0, true, msg);
+    // Ha a szenzor nem ad vissza értéket, küldünk egy MQTT hibajelzést!
+    if (isnan(myTemperature) || isnan(myHumidity)) {
+      char errorTopic[120];
+      snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
+      
+      if (mqttClient.connected()) {
+        mqttClient.publish(errorTopic, 0, true, "HIBA: A DHT22 szenzor nem ad vissza erteket!");
+      }
+      return; 
     }
+
+    // Ha jók az adatok, mehet a rendes küldés
+    JsonDocument doc;
+    doc["temp"] = round(myTemperature * 10) / 10.0;
+    doc["humi"] = round(myHumidity * 10) / 10.0;
+
+    char outBuffer[128];
+    serializeJson(doc, outBuffer, sizeof(outBuffer));
+
+    snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "sensors");   
+    
+    if (mqttClient.connected()) {
+      // Küldés előtt töröljük az esetleges korábbi hibaüzenetet (üres üzenettel)
+      char errorTopic[120];
+      snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
+      mqttClient.publish(errorTopic, 0, true, "");
+
+      // Rendes adatok küldése
+      mqttClient.publish(tempMqttTopic, 0, true, outBuffer);
+    }
+  }
 }
