@@ -23,6 +23,7 @@ Ticker wifiReconnectTimer;
 #define WIFI_CONNECT_RETRIES 5
 #define RESET_BUTTON_PIN 0
 #define RESET_HOLD_MS 5000
+#define AVAILABILITY_HEARTBEAT_MS 60000
 
 // Mentendő egyedi MQTT paraméterek (alapértelmezett értékekkel)
 char mqtt_server[40] = "192.168.1.31";
@@ -47,6 +48,7 @@ bool shouldSaveConfig = false;
 bool dhtReady = false;
 bool resetHoldTriggered = false;
 unsigned long resetPressStartedAt = 0;
+unsigned long lastAvailabilityHeartbeatAt = 0;
 
 void initDht() {
   if (dhtReady) {
@@ -77,6 +79,12 @@ void saveConfigCallback() {
 }
 
 void connectToMqtt();
+
+void publishAvailabilityOnline() {
+  snprintf(lwtTopic, sizeof(lwtTopic), "%s/%s", full_mqtt_topic, "availability");
+  mqttClient.publish(lwtTopic, 1, true, "online");
+  lastAvailabilityHeartbeatAt = millis();
+}
 
 void performFactoryReset() {
   Serial.println("Gyari visszaallitas indul (WiFi + MQTT config torles)...");
@@ -181,8 +189,7 @@ void onMqttConnect(bool sessionPresent) {
   mqttReconnectTimer.detach();
   Serial.println("MQTT-hez csatlakozva.");
 
-  snprintf(lwtTopic, sizeof(lwtTopic), "%s/%s", full_mqtt_topic, "availability");
-  mqttClient.publish(lwtTopic, 1, true, "online");
+  publishAvailabilityOnline();
 
   snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "commandTopic");
   mqttClient.subscribe(tempMqttTopic, 2);
@@ -388,6 +395,10 @@ void loop() {
 
   if (!mqttClient.connected() || !dhtReady) {
     return;
+  }
+
+  if (now - lastAvailabilityHeartbeatAt >= AVAILABILITY_HEARTBEAT_MS) {
+    publishAvailabilityOnline();
   }
 
   if (now - lastMsg > 15000) {
