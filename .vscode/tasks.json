@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PlatformIO: Upload",
+            "type": "shell",
+            "command": "pio run -t upload",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "PlatformIO: Monitor",
+            "type": "shell",
+            "command": "pio device monitor",
+            "isBackground": true,
+            "problemMatcher": []
+        }
+    ]
+}
