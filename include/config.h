@@ -1,0 +1,50 @@
+#pragma once
+
+#include <DHT.h>
+
+// --- Hardver ---
+#define DHTPIN 2
+#define DHTTYPE DHT22
+#define RESET_BUTTON_PIN 0
+#define RESET_HOLD_MS 5000
+
+// --- WiFi ---
+#define WIFI_CONNECT_TIMEOUT_SEC 90
+#define WIFI_CONNECT_RETRIES 5
+#define WIFI_VALID_IP_WAIT_SEC 30
+#define WIFI_CONFIG_PORTAL_TIMEOUT_SEC 180
+#define WIFI_AP_SSID "ESP01_DHT22_AP"
+#define WIFI_AP_PASSWORD "12345678"
+#define WIFI_FALLBACK_HOSTNAME "esp01_dht22_fallback"
+
+// --- MQTT mező méretek ---
+#define MQTT_SERVER_LEN 40
+#define MQTT_PORT_LEN 6
+#define MQTT_USER_LEN 40
+#define MQTT_PASSWORD_LEN 40
+#define MQTT_MAIN_TOPIC_LEN 50
+#define MQTT_DEVICE_NAME_LEN 40
+#define MQTT_TOPIC_BUFFER_LEN 100
+#define MQTT_TOPIC_TOPIC_LEN 120
+#define MQTT_JSON_BUFFER_LEN 128
+
+// --- MQTT alapértelmezések (LittleFS felülírja, ha van mentett config) ---
+#define MQTT_SERVER_DEFAULT "192.168.1.31"
+#define MQTT_SERVER_PORT_DEFAULT "1883"
+#define MQTT_USER_DEFAULT ""
+#define MQTT_PASSWORD_DEFAULT ""
+#define MQTT_MAIN_TOPIC_DEFAULT "pl_devices"
+#define MQTT_DEVICE_NAME_DEFAULT "esp01_DHT22_teracce_01"
+
+// --- Szenzor / heartbeat ---
+#define AVAILABILITY_HEARTBEAT_MS 60000
+#define SENSOR_READ_INTERVAL_MS 2000
+#define HEARTBEAT_INTERVAL_MS 15000
+#define HEARTBEAT_STEP_SEC (HEARTBEAT_INTERVAL_MS / 1000)
+#define HEARTBEAT_COUNTER_MAX 1500
+#define SENSOR_CHANGE_THRESHOLD 0.1f
+
+// --- DHT olvasás ---
+#define DHT_INIT_DELAY_MS 2000
+#define DHT_READ_MAX_ATTEMPTS 3
+#define DHT_READ_RETRY_DELAY_MS 250

@@ -9,39 +9,35 @@
 #include <ArduinoJson.h>
 #include <Ticker.h>
 #include <AsyncMqttClient.h>
-#include <DHT.h>
+#include <math.h>
+#include "config.h"
 
-#define DHTPIN          2         // GPIO2 az ESP-01-en
-#define DHTTYPE         DHT22     // DHT 22 (AM2302)
 DHT dht = DHT(DHTPIN, DHTTYPE);
 
 AsyncMqttClient mqttClient;
 Ticker mqttReconnectTimer;
 Ticker wifiReconnectTimer;
 
-#define WIFI_CONNECT_TIMEOUT_SEC 90
-#define WIFI_CONNECT_RETRIES 5
-#define RESET_BUTTON_PIN 0
-#define RESET_HOLD_MS 5000
-#define AVAILABILITY_HEARTBEAT_MS 60000
-
 // Mentendő egyedi MQTT paraméterek (alapértelmezett értékekkel)
-char mqtt_server[40] = "192.168.1.31";
-char mqtt_server_port[6] = "1883";
-char mqtt_user[40] = "";
-char mqtt_password[40] = "";
-char mqtt_main_topic[50] = "pl_devices";
-char mqtt_device_name[40] = "esp01_DHT22_teracce_01";
+char mqtt_server[MQTT_SERVER_LEN] = MQTT_SERVER_DEFAULT;
+char mqtt_server_port[MQTT_PORT_LEN] = MQTT_SERVER_PORT_DEFAULT;
+char mqtt_user[MQTT_USER_LEN] = MQTT_USER_DEFAULT;
+char mqtt_password[MQTT_PASSWORD_LEN] = MQTT_PASSWORD_DEFAULT;
+char mqtt_main_topic[MQTT_MAIN_TOPIC_LEN] = MQTT_MAIN_TOPIC_DEFAULT;
+char mqtt_device_name[MQTT_DEVICE_NAME_LEN] = MQTT_DEVICE_NAME_DEFAULT;
 
 // Dinamikusan felépített topikok
-char full_mqtt_topic[100];
-char tempMqttTopic[120];
-char lwtTopic[120];
+char full_mqtt_topic[MQTT_TOPIC_BUFFER_LEN];
+char tempMqttTopic[MQTT_TOPIC_TOPIC_LEN];
+char lwtTopic[MQTT_TOPIC_TOPIC_LEN];
 
-float myTemperature = 0, myHumidity = 0; 
-unsigned long lastMsg = 0; 
-#define MSG_BUFFER_SIZE (50)
-char msg[MSG_BUFFER_SIZE];
+float myTemperature = 0, myHumidity = 0;
+float lastPublishedTemp = NAN;
+float lastPublishedHumidity = NAN;
+unsigned long lastSensorReadAt = 0;
+unsigned long lastHeartbeatAt = 0;
+unsigned long lastSensorErrorAt = 0;
+uint16_t heartbeatCounter = 0;
 
 // Flag, ami jelzi, ha a WiFiManager felületén új adatokat mentettek el
 bool shouldSaveConfig = false;
@@ -56,19 +52,19 @@ void initDht() {
   }
   Serial.println("DHT init (MQTT utan)...");
   dht.begin();
-  delay(2000);
+  delay(DHT_INIT_DELAY_MS);
   dhtReady = true;
   Serial.println("DHT keszen all.");
 }
 
 bool readDHTSensor(float &temperature, float &humidity) {
-  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+  for (uint8_t attempt = 0; attempt < DHT_READ_MAX_ATTEMPTS; attempt++) {
     temperature = dht.readTemperature(false);
     humidity = dht.readHumidity(false);
     if (!isnan(temperature) && !isnan(humidity)) {
       return true;
     }
-    delay(250);
+    delay(DHT_READ_RETRY_DELAY_MS);
   }
   return false;
 }
@@ -135,7 +131,7 @@ void handleResetButton() {
   }
 }
 
-bool waitForValidIp(uint8_t maxSeconds = 30) {
+bool waitForValidIp(uint8_t maxSeconds = WIFI_VALID_IP_WAIT_SEC) {
   for (uint8_t i = 0; i < maxSeconds; i++) {
     if (WiFi.isConnected() && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
       return true;
@@ -283,23 +279,23 @@ void setup() {
   if (strlen(mqtt_device_name) > 0) {
     WiFi.hostname(mqtt_device_name);
   } else {
-    WiFi.hostname("esp01_dht22_fallback");
+    WiFi.hostname(WIFI_FALLBACK_HOSTNAME);
   }
   // -----------------------------------------------------------
 
   // 2. WiFiManager paraméterek előkészítése a webes felülethez
-  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_server_port, 6);
-  WiFiManagerParameter custom_mqtt_user("user", "MQTT User", mqtt_user, 40);
-  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", mqtt_password, 40);
-  WiFiManagerParameter custom_mqtt_main_topic("main_topic", "MQTT Main Topic", mqtt_main_topic, 50);
-  WiFiManagerParameter custom_mqtt_device_name("device_name", "Device Name (Hostname)", mqtt_device_name, 40);
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, MQTT_SERVER_LEN);
+  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_server_port, MQTT_PORT_LEN);
+  WiFiManagerParameter custom_mqtt_user("user", "MQTT User", mqtt_user, MQTT_USER_LEN);
+  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", mqtt_password, MQTT_PASSWORD_LEN);
+  WiFiManagerParameter custom_mqtt_main_topic("main_topic", "MQTT Main Topic", mqtt_main_topic, MQTT_MAIN_TOPIC_LEN);
+  WiFiManagerParameter custom_mqtt_device_name("device_name", "Device Name (Hostname)", mqtt_device_name, MQTT_DEVICE_NAME_LEN);
 
   WiFiManager wifiManager;
 
   wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT_SEC);
   wifiManager.setConnectRetries(WIFI_CONNECT_RETRIES);
-  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
 
   // Callback beállítása mentés esetére
   wifiManager.setSaveConfigCallback(saveConfigCallback);
@@ -313,13 +309,13 @@ void setup() {
   wifiManager.addParameter(&custom_mqtt_device_name);
 
   // Ha nem tud csatlakozni a mentett hálózathoz, elindítja az AP-t
-  if (!wifiManager.autoConnect("ESP01_DHT22_AP", "12345678")) {
+  if (!wifiManager.autoConnect(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
     Serial.println("Sikertelen csatlakozas (autoConnect), ujrainditas...");
     delay(3000);
     ESP.restart();
   }
 
-  if (!waitForValidIp(30)) {
+  if (!waitForValidIp(WIFI_VALID_IP_WAIT_SEC)) {
     Serial.println("Nincs ervenyes IP (DHCP), ujrainditas...");
     delay(3000);
     ESP.restart();
@@ -401,37 +397,62 @@ void loop() {
     publishAvailabilityOnline();
   }
 
-  if (now - lastMsg > 15000) {
-    lastMsg = now;
-
-    if (!readDHTSensor(myTemperature, myHumidity)) {
-      char errorTopic[120];
-      snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
-      
-      if (mqttClient.connected()) {
-        mqttClient.publish(errorTopic, 0, true, "HIBA: A DHT22 szenzor nem ad vissza erteket!");
-      }
-      return; 
+  if (now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatAt = now;
+    heartbeatCounter += HEARTBEAT_STEP_SEC;
+    if (heartbeatCounter >= HEARTBEAT_COUNTER_MAX) {
+      heartbeatCounter = 0;
     }
 
-    // Ha jók az adatok, mehet a rendes küldés
-    JsonDocument doc;
-    doc["temp"] = round(myTemperature * 10) / 10.0;
-    doc["humi"] = round(myHumidity * 10) / 10.0;
-
-    char outBuffer[128];
-    serializeJson(doc, outBuffer, sizeof(outBuffer));
-
-    snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "sensors");   
-    
-    if (mqttClient.connected()) {
-      // Küldés előtt töröljük az esetleges korábbi hibaüzenetet (üres üzenettel)
-      char errorTopic[120];
-      snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
-      mqttClient.publish(errorTopic, 0, true, "");
-
-      // Rendes adatok küldése
-      mqttClient.publish(tempMqttTopic, 0, true, outBuffer);
-    }
+    char heartbeatPayload[8];
+    snprintf(heartbeatPayload, sizeof(heartbeatPayload), "%u", heartbeatCounter);
+    snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "heartbeat");
+    mqttClient.publish(tempMqttTopic, 0, true, heartbeatPayload);
   }
+
+  if (now - lastSensorReadAt < SENSOR_READ_INTERVAL_MS) {
+    return;
+  }
+  lastSensorReadAt = now;
+
+  if (!readDHTSensor(myTemperature, myHumidity)) {
+    if (now - lastSensorErrorAt >= HEARTBEAT_INTERVAL_MS && mqttClient.connected()) {
+      lastSensorErrorAt = now;
+      char errorTopic[MQTT_TOPIC_TOPIC_LEN];
+      snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
+      mqttClient.publish(errorTopic, 0, true, "HIBA: A DHT22 szenzor nem ad vissza erteket!");
+    }
+    return;
+  }
+
+  float temp = round(myTemperature * 10) / 10.0;
+  float humi = round(myHumidity * 10) / 10.0;
+
+  bool hasPreviousPublish = !isnan(lastPublishedTemp) && !isnan(lastPublishedHumidity);
+  bool valueChanged = !hasPreviousPublish
+    || fabs(temp - lastPublishedTemp) >= SENSOR_CHANGE_THRESHOLD
+    || fabs(humi - lastPublishedHumidity) >= SENSOR_CHANGE_THRESHOLD;
+
+  if (!valueChanged) {
+    return;
+  }
+
+  JsonDocument doc;
+  doc["temp"] = temp;
+  doc["humi"] = humi;
+
+  char outBuffer[MQTT_JSON_BUFFER_LEN];
+  serializeJson(doc, outBuffer, sizeof(outBuffer));
+
+  snprintf(tempMqttTopic, sizeof(tempMqttTopic), "%s/%s", full_mqtt_topic, "sensors");
+
+  if (mqttClient.connected()) {
+    char errorTopic[MQTT_TOPIC_TOPIC_LEN];
+    snprintf(errorTopic, sizeof(errorTopic), "%s/%s", full_mqtt_topic, "debug");
+    mqttClient.publish(errorTopic, 0, true, "");
+    mqttClient.publish(tempMqttTopic, 0, true, outBuffer);
+  }
+
+  lastPublishedTemp = temp;
+  lastPublishedHumidity = humi;
 }
